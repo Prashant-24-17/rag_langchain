@@ -7,14 +7,14 @@ from langchain.chains import RetrievalQA
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 from langchain.prompts import PromptTemplate
-
+from sentence_transformers import SentenceTransformer, util
 
 # Load the PDF
 loader = PDFPlumberLoader('yolo.pdf')
 docs = loader.load()
 
 # Split documents into chunks
-splitter = RecursiveCharacterTextSplitter(chunk_size=250 , chunk_overlap=25)
+splitter = RecursiveCharacterTextSplitter(chunk_size=250, chunk_overlap=25)
 chunked_docs = splitter.split_documents(docs)
 
 # Create embeddings
@@ -24,7 +24,7 @@ embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-Mi
 vector = FAISS.from_documents(chunked_docs, embedding_model)
 
 # Create retriever
-retriever = vector.as_retriever(search_type='similarity', search_kwargs={'k': 3})
+retriever = vector.as_retriever(search_type='similarity', search_kwargs={'k': 10})
 
 # Initialize the Ollama LLM
 llm = Ollama(model="mistral")
@@ -73,6 +73,36 @@ qa = RetrievalQA(
     return_source_documents=False,  # Disable returning source documents
 )
 
+# Reranking function
+def rerank_document(query, retrieved_docs):
+    """
+    Rerank the retrieved documents based on relevance scores using SentenceTransformer.
+    """
+    # Load the reranker model
+    reranker_model = SentenceTransformer("cross-encoder/ms-marco-MiniLM-L-2-v2")
+    
+    # Prepare document texts
+    doc_texts = [doc.page_content for doc in retrieved_docs]
+    
+    # Compute similarity scores between the query and document texts
+    scores = reranker_model.encode([query], convert_to_tensor=True)
+    doc_embeddings = reranker_model.encode(doc_texts, convert_to_tensor=True)
+    cosine_scores = util.cos_sim(scores, doc_embeddings).squeeze(0).tolist()
+    print(cosine_scores[:3])
+    
+    # Sort documents by scores in descending order
+    ranked_indices = sorted(range(len(cosine_scores)), key=lambda i: cosine_scores[i], reverse=True)
+    return [retrieved_docs[i] for i in ranked_indices[:3]]  # Select top 3
+
 # Query the system
-response = qa.run("What is YOLO?")
+query = "What is YOLO?"
+retrieved_docs = retriever.get_relevant_documents(query)
+reranked_docs = rerank_document(query, retrieved_docs)
+
+# Prepare context using reranked documents
+context = " ".join([doc.page_content for doc in reranked_docs])
+
+# Query the QA chain
+response = qa.run(query)
+
 print("Answer:", response)
